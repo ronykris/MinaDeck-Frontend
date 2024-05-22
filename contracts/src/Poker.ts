@@ -1,4 +1,4 @@
-import { Field, SmartContract, state, State, method, Poseidon, UInt64, provable } from 'o1js';
+import { Field, SmartContract, state, State, method, Poseidon, UInt64, Provable } from 'o1js';
 import { evaluateHand } from './PokerLib.js';
 
 export class ShuffleContract extends SmartContract {
