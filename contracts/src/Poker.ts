@@ -3,88 +3,102 @@ import { evaluateHand } from './PokerLib.js';
 
 export class ShuffleContract extends SmartContract {
 
-  @state(Field) shuffled = State<Field[]>();
-  @state(Field) boardCards = State<Field[]>();
-  @state(Field) playerHands = State<{ [playerId: string]: Field[] }>();
-  @state(Field) winner = State<String[]>();
+    @state(Provable.Array(Field, 52)) shuffled = State<Field[]>()
+    @state(Provable.Array(Field, 5)) boardCards = State<Field[]>()
+    @state(Provable.Array(Provable.Array(Field, 2), 10)) playerHands = State<Field[][]>()
+    @state(Field) winner = State<Field>();
+  
 
-  init() {
-    super.init();
-  }
-
-  @method async shuffle() {
-    const suits = ["Hearts", "Diamonds", "Clubs", "Spades"];
-    const values = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
-    const deck: Field[] = [];
-
-    for (const suit of suits) {
-      for (const value of values) {
-        const card = new Field(Poseidon.hash([new Field(suits.indexOf(suit)), new Field(values.indexOf(value))]));
-        deck.push(card);
-      }
+    init() {
+        super.init();
     }
 
-    const shuffled = deck.slice();
+    @method async shuffle() {
+        const suits = ["Hearts", "Diamonds", "Clubs", "Spades"];
+        const values = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
+        const deck: Field[] = []
 
-    // Fisher-Yates shuffle algorithm
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        let index = Field(0);
+        for (let suitIndex = 0; suitIndex < suits.length; suitIndex++) {
+            for (let valueIndex = 0; valueIndex < values.length; valueIndex++) {
+                const card = Poseidon.hash([Field(suitIndex), Field(valueIndex)]);
+                deck.push(index, card);
+                index = index.add(1)
+            }
+        }
+
+        let shuffled = deck.slice();
+
+        // Fisher-Yates shuffle algorithm
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+
+        this.shuffled.set(shuffled);
     }
 
-    this.shuffled.set(shuffled);
-  }
+    @method async allocateCards() {
+        const shuffledDeck = this.shuffled.get();
+        const tempPlayerHands: Field[][] = []       
+        const tempBoardCards: Field[] = []
 
-  @method async allocateCards(playerIds: String[]) {
-    const shuffledDeck = this.shuffled.get();
-    const tempPlayerHands: { [playerId: string]: Field[] } = {};
-    const tempBoardCards: Field[] = [];
+        // Deal two cards to each player
+        for (let i = 0; i < 10; i++) {
+            tempPlayerHands[i] = [shuffledDeck.pop()!, shuffledDeck.pop()!]
+        }
 
-    // Deal two cards to each player
-    for (let i = 0; i < playerIds.length; i++) {
-      const playerId = playerIds[i].toString();
-      tempPlayerHands[playerId] = [shuffledDeck.pop()!, shuffledDeck.pop()!];
+        // Deal the board cards
+        for (let i = 0; i < 5; i++) {
+            tempBoardCards.push(shuffledDeck.pop()!);
+        }
+
+        this.playerHands.set(tempPlayerHands);
+        this.boardCards.set(tempBoardCards);
     }
 
-    // Deal the board cards
-    for (let i = 0; i < 5; i++) {
-      tempBoardCards.push(shuffledDeck.pop()!);
+    @method async revealWinner() {
+        const playerHands = this.playerHands.get();
+        const boardCards = this.boardCards.get();
+        const evaluatedHands: { [playerId: number]: Field } = {};
+
+        for (const player in playerHands) {
+            const hand = playerHands[player];
+            const combinedHand = hand.concat(boardCards);
+            evaluatedHands[player] = Field(evaluateHand(combinedHand));
+        }
+
+        let maxField = Field(0);
+        for (const playerId in evaluatedHands) {
+            maxField = Provable.if( evaluatedHands[playerId].greaterThan(maxField), evaluatedHands[playerId], maxField)
+        }
+
+        const winners: number[] = []
+        for (let i = 0; i < 10; i++) {
+            const handValue = evaluatedHands[i];
+            if (handValue.equals(maxField).toBoolean()) {
+                winners.push(i);
+            }
+        }
+        this.winner.set(Field(winners.length));
     }
 
-    this.playerHands.set(tempPlayerHands);
-    this.boardCards.set(tempBoardCards);
-  }
+    @method async payout(amount: UInt64, playerId: number) {
+        const winnersLength = this.winner.get().toBigInt()
+        let isWinner = Field(0)
 
-  @method async revealWinner() {
-    const playerHands = this.playerHands.get();
-    const boardCards = this.boardCards.get();
-    const evaluatedHands: { [playerId: string]: Field } = {};
+        for (let i = 0; i < winnersLength; i++) {
+            const winnerId = Field(i)
+            if (winnerId.equals(playerId).toBoolean()) {
+                isWinner = Field(1)
+                break;
+            }
+        }      
 
-    for (const playerId in playerHands) {
-      const hand = playerHands[playerId];
-      const combinedHand = [...hand, ...boardCards];
-      evaluatedHands[playerId] = new Field(evaluateHand(combinedHand));
+        if (isWinner) {
+            this.send({ to: this.sender.getAndRequireSignature(), amount });
+        } else {
+            this.emitEvent('Payout', 'Player did not win');
+        }
     }
-
-    const maxField = Object.values(evaluatedHands).reduce((max, field) => {
-      return field.greaterThan(max) ? field : max;
-    });
-
-    const winners = Object.keys(evaluatedHands).filter((playerId) => {
-      return evaluatedHands[playerId].equals(maxField);
-    });
-
-    this.winner.set(winners);
-  }
-
-  @method async payout(amount: UInt64, playerIds: String) {
-    const winners = this.winner.get();
-
-    if (winners.includes(playerIds.toString())) {
-      this.send({ to: this.sender.getAndRequireSignature(), amount });
-    } else {
-      this.emitEvent('Payout', 'Player did not win')
-    }
-
-  }
 }
